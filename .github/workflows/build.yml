@@ -1,6 +1,7 @@
 name: Build SukiSU Kernel (miatoll 4.14)
 
 on:
+  push:
   workflow_dispatch:
     inputs:
       kernel_repo:
