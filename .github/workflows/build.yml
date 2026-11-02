@@ -98,24 +98,7 @@ jobs:
           ls -d KernelSU drivers/kernelsu 2>/dev/null || { echo "::error::setup.sh ничего не добавил"; exit 1; }
           grep -q kernelsu drivers/Makefile || { echo "::error::drivers/Makefile не подключает kernelsu"; exit 1; }
           grep -q kernelsu drivers/Kconfig || { echo "::error::drivers/Kconfig не подключает kernelsu"; exit 1; }
-
-      - name: Compat fixes for 4.14
-        working-directory: kernel
-        run: |
-          KDIR=drivers/kernelsu
-          [ -e "$KDIR" ] || KDIR=KernelSU/kernel
-          echo "=== использование static_call в коде root ==="
-          grep -rnE 'static_call|DEFINE_STATIC_CALL' "$KDIR/" || echo "нет использования"
-          if [ ! -f include/linux/static_call.h ]; then
-            echo "static_call.h нет в ядре, закрываем include условием по версии"
-            grep -rl '<linux/static_call.h>' "$KDIR/" | while read -r f; do
-              sed -i 's|^#include <linux/static_call.h>|#include <linux/version.h>\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)\n#include <linux/static_call.h>\n#endif|' "$f"
-              echo "пропатчен: $f"
-            done
-          fi
-          echo "=== kernel_includes.h 55-95 ==="
-          sed -n 55,95p "$KDIR/kernel_includes.h" 2>/dev/null || true
-
+          
       - name: Apply custom patches (optional)
         working-directory: kernel
         run: |
