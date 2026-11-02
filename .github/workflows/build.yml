@@ -131,7 +131,7 @@ jobs:
         working-directory: kernel
         run: |
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
-          make $ARGS -j"$(nproc)" 2>&1 | tee build.log
+          make $ARGS -k -j"$(nproc)" 2>&1 | tee build.log
           ls -la out/arch/arm64/boot
 
       - name: Package AnyKernel3
@@ -188,8 +188,13 @@ jobs:
       - name: Show errors
         if: failure()
         run: |
-          [ -f kernel/build.log ] && { grep -nE "error:|Error [0-9]+" kernel/build.log | head -40; echo ----; tail -n 60 kernel/build.log; } || echo "build.log нет, смотри шаг выше"
-
+          [ -f kernel/build.log ] || { echo "build.log нет, смотри шаг выше"; exit 0; }
+          echo "=== контекст первых ошибок ==="
+          grep -n -B15 -m3 -E '\*\*\* \[' kernel/build.log || true
+          echo "=== fatal/error ==="
+          grep -nE 'fatal error|error:' kernel/build.log | head -20 || true
+          echo "=== kernel_includes.h ==="
+          sed -n 55,95p kernel/drivers/kernelsu/kernel_includes.h 2>/dev/null || true
       - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
