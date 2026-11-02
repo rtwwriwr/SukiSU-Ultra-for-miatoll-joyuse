@@ -40,6 +40,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     env:
+      KSU_SOURCE: ${{ inputs.ksu_source || 'kernelsu-v0.9.5' }}
       KERNEL_REPO: ${{ inputs.kernel_repo || 'https://github.com/LineageOS/android_kernel_xiaomi_sm6250.git' }}
       KERNEL_BRANCH: ${{ inputs.kernel_branch || 'lineage-22.2' }}
       KSU_REF: ${{ inputs.ksu_ref || 'auto' }}
@@ -71,30 +72,26 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
           clang/bin/clang --version | head -n1
-
-      - name: Integrate SukiSU
+          
+      - name: Integrate root
         working-directory: kernel
         run: |
-          SUKI=https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
-          REF="$KSU_REF"
-          has() { git ls-remote --exit-code "$SUKI" "refs/heads/$1" "refs/tags/$1" >/dev/null 2>&1; }
-          if [ "$REF" = auto ]; then
-            if has nongki; then REF=nongki
-            elif has builtin; then REF=builtin
-            else REF=""; fi
-          elif ! has "$REF"; then REF=""; fi
-          if [ -z "$REF" ]; then
-            echo "::error::Нужная ветка SukiSU не найдена. Доступные:"
-            git ls-remote --heads "$SUKI" | sed 's#.*refs/heads/##'
-            exit 1
+          if [ "$KSU_SOURCE" = kernelsu-v0.9.5 ]; then
+            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          else
+            SUKI=https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+            REF="$KSU_REF"
+            has() { git ls-remote --exit-code "$SUKI" "refs/heads/$1" "refs/tags/$1" >/dev/null 2>&1; }
+            if [ "$REF" = auto ]; then
+              if has nongki; then REF=nongki; elif has builtin; then REF=builtin; else REF=""; fi
+            elif ! has "$REF"; then REF=""; fi
+            [ -n "$REF" ] || { echo "::error::Ветка SukiSU не найдена"; git ls-remote --heads "$SUKI" | sed 's#.*refs/heads/##'; exit 1; }
+            echo "SukiSU ref: $REF"
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$REF"
           fi
-          echo "SukiSU ref: $REF"
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$REF"
           ls -d KernelSU drivers/kernelsu 2>/dev/null || { echo "::error::setup.sh ничего не добавил"; exit 1; }
           grep -q kernelsu drivers/Makefile || { echo "::error::drivers/Makefile не подключает kernelsu"; exit 1; }
           grep -q kernelsu drivers/Kconfig || { echo "::error::drivers/Kconfig не подключает kernelsu"; exit 1; }
-          echo "=== опции KSU ==="
-          grep -rhn "^config KSU" drivers/kernelsu/ KernelSU/ 2>/dev/null | sort -u || true
 
       - name: Apply custom patches (optional)
         working-directory: kernel
