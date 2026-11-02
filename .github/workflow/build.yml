@@ -1,1 +1,231 @@
+name: Build SukiSU Kernel (miatoll 4.14)
 
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_source:
+        description: Источник root
+        type: choice
+        options: [kernelsu-v0.9.5, sukisu]
+        default: kernelsu-v0.9.5
+      kernel_repo:
+        description: Репозиторий ядра
+        default: https://github.com/LineageOS/android_kernel_xiaomi_sm6250.git
+      kernel_branch:
+        description: Ветка ядра
+        default: lineage-22.2
+      ksu_ref:
+        description: Ветка SukiSU (auto = nongki, иначе builtin)
+        default: auto
+      hook_mode:
+        description: Способ хуков
+        type: choice
+        options: [kprobes, manual]
+        default: kprobes
+      skip_dtbo:
+        description: Не собирать dtbo-оверлеи (обход ошибки dtc)
+        type: choice
+        options: ["yes", "no"]
+        default: "yes"
+  push:
+    paths:
+      - ".github/workflows/build.yml"
+      - "patches/**"
+
+concurrency:
+  group: build-kernel
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      KSU_SOURCE: ${{ inputs.ksu_source || 'kernelsu-v0.9.5' }}
+      KERNEL_REPO: ${{ inputs.kernel_repo || 'https://github.com/LineageOS/android_kernel_xiaomi_sm6250.git' }}
+      KERNEL_BRANCH: ${{ inputs.kernel_branch || 'lineage-22.2' }}
+      KSU_REF: ${{ inputs.ksu_ref || 'auto' }}
+      HOOK_MODE: ${{ inputs.hook_mode || 'kprobes' }}
+      SKIP_DTBO: ${{ inputs.skip_dtbo || 'yes' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex build-essential libssl-dev libelf-dev \
+            libncurses-dev cpio lz4 xz-utils zip curl git python3 u-boot-tools file
+
+      - name: Clone Kernel
+        run: |
+          if ! git ls-remote --exit-code --heads "$KERNEL_REPO" "$KERNEL_BRANCH" >/dev/null; then
+            echo "::error::Ветка $KERNEL_BRANCH не найдена. Доступные:"
+            git ls-remote --heads "$KERNEL_REPO" | sed 's#.*refs/heads/##'
+            exit 1
+          fi
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+          cd kernel
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' Makefile
+          grep -q '^PATCHLEVEL = 14' Makefile || echo "::warning::Ядро не 4.14, проверь ветку"
+          echo "=== defconfig-кандидаты ==="
+          find arch/arm64/configs -name '*miatoll*'
+
+      - name: Clone Toolchain (Proton clang)
+        run: |
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
+          clang/bin/clang --version | head -n1
+
+      - name: Integrate root
+        working-directory: kernel
+        run: |
+          if [ "$KSU_SOURCE" = kernelsu-v0.9.5 ]; then
+            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          else
+            SUKI=https://github.com/SukiSU-Ultra/SukiSU-Ultra.git
+            REF="$KSU_REF"
+            has() { git ls-remote --exit-code "$SUKI" "refs/heads/$1" "refs/tags/$1" >/dev/null 2>&1; }
+            if [ "$REF" = auto ]; then
+              if has nongki; then REF=nongki; elif has builtin; then REF=builtin; else REF=""; fi
+            elif ! has "$REF"; then REF=""; fi
+            [ -n "$REF" ] || { echo "::error::Ветка SukiSU не найдена"; git ls-remote --heads "$SUKI" | sed 's#.*refs/heads/##'; exit 1; }
+            echo "SukiSU ref: $REF"
+            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$REF"
+          fi
+          ls -d KernelSU drivers/kernelsu 2>/dev/null || { echo "::error::setup.sh ничего не добавил"; exit 1; }
+          grep -q kernelsu drivers/Makefile || { echo "::error::drivers/Makefile не подключает kernelsu"; exit 1; }
+          grep -q kernelsu drivers/Kconfig || { echo "::error::drivers/Kconfig не подключает kernelsu"; exit 1; }
+
+      - name: Apply custom patches (optional)
+        working-directory: kernel
+        run: |
+          shopt -s nullglob
+          for p in "$GITHUB_WORKSPACE"/patches/*.patch; do
+            echo "Patch: $p"
+            git apply --check "$p" && git apply "$p" || { echo "::error::Не применился $p"; exit 1; }
+          done
+
+      - name: Configure
+        working-directory: kernel
+        run: |
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          DEFCONFIG_PATH=$(find arch/arm64/configs -name miatoll_defconfig | head -n1)
+          [ -n "$DEFCONFIG_PATH" ] || { echo "::error::miatoll_defconfig не найден"; find arch/arm64/configs -name '*miatoll*'; exit 1; }
+          DEFCONFIG=${DEFCONFIG_PATH#arch/arm64/configs/}
+          echo "DEFCONFIG=$DEFCONFIG" >> "$GITHUB_ENV"
+          ARGS="O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCFLAGS=-fcommon"
+          echo "ARGS=$ARGS" >> "$GITHUB_ENV"
+          make $ARGS "$DEFCONFIG"
+          if [ "$HOOK_MODE" = kprobes ]; then
+            scripts/config --file out/.config -e KSU -e KPROBES -e KPROBE_EVENTS -e KALLSYMS -e KALLSYMS_ALL
+          else
+            scripts/config --file out/.config -e KSU -d KPROBES -e KALLSYMS -e KALLSYMS_ALL
+            grep -rq "config KSU_MANUAL_HOOK" drivers/kernelsu KernelSU 2>/dev/null && scripts/config --file out/.config -e KSU_MANUAL_HOOK || true
+          fi
+          if [ "$SKIP_DTBO" = yes ]; then
+            scripts/config --file out/.config -d BUILD_ARM64_DT_OVERLAY
+          fi
+          make $ARGS olddefconfig
+          echo "=== итоговый .config ==="
+          grep -E '^(# )?CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KALLSYMS|KALLSYMS_ALL|MODULES|BUILD_ARM64_DT_OVERLAY)[ =]' out/.config || true
+          grep -q '^CONFIG_KSU=y' out/.config || { echo "::error::CONFIG_KSU не включился"; exit 1; }
+          if [ "$HOOK_MODE" = kprobes ]; then
+            grep -q '^CONFIG_KPROBES=y' out/.config || { echo "::error::KPROBES не включился (нужен CONFIG_MODULES или другие зависимости)"; exit 1; }
+          fi
+
+      - name: Diagnose DTS
+        working-directory: kernel
+        run: |
+          D=arch/arm64/boot/dts/qcom
+          F=$D/cust-atoll.dtsi
+          echo "=== ls -l ==="; ls -l "$F" || true
+          echo "=== git index (120000 = symlink) ==="; git ls-files -s "$F" || true
+          echo "=== file ==="; file "$F" || true
+          echo "=== первые строки cust-atoll.dtsi ==="; head -n 12 "$F" | cat -A | cut -c1-160 || true
+          echo "=== кто включает cust-atoll.dtsi ==="; grep -rn 'cust-atoll.dtsi' "$D" | head -n 20 || true
+          echo "=== оверлеи curtana ==="; ls -l "$D"/*curtana* || true
+          echo "=== начало оверлея ==="; head -n 12 "$D"/curtana-atoll-ab-idp-overlay.dts | cat -A | cut -c1-160 || true
+          echo "=== git status ==="; git status --short | head -n 20 || true
+
+      - name: Build Kernel
+        working-directory: kernel
+        run: |
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          make $ARGS -k -j"$(nproc)" 2>&1 | tee build.log
+          ls -la out/arch/arm64/boot
+
+      - name: Package AnyKernel3
+        working-directory: kernel
+        run: |
+          OUT=out/arch/arm64/boot
+          IMG=""
+          for f in Image.gz-dtb Image.gz Image; do [ -f "$OUT/$f" ] && { IMG="$f"; break; }; done
+          [ -n "$IMG" ] || { echo "::error::Образ ядра не найден"; ls -la "$OUT"; exit 1; }
+          [ "$IMG" = Image.gz-dtb ] || echo "::warning::Нет Image.gz-dtb: dtb не вшит, прошивка может не загрузиться"
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          cd ak3
+          rm -rf .git .github README.md anykernel.sh
+          cp "../$OUT/$IMG" .
+          cat > anykernel.sh <<'EOF'
+          properties() { '
+          kernel.string=SukiSU Ultra kernel (miatoll 4.14)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=joyeuse
+          device.name2=curtana
+          device.name3=excalibur
+          device.name4=gram
+          device.name5=miatoll
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+
+          boot_attributes() {
+          set_perm_recursive 0 0 755 644 $RAMDISK/*;
+          set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+          }
+
+          BLOCK=auto;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          dump_boot;
+          write_boot;
+          EOF
+          sed -i 's/^          //' anykernel.sh
+          zip -r9 "../SukiSU-miatoll-4.14.zip" . -x '*placeholder'
+          cd ..
+          cp out/.config ../kernel-config.txt
+          [ -f "$OUT/dtbo.img" ] && cp "$OUT/dtbo.img" ../dtbo.img || true
+
+      - name: Show errors
+        if: failure()
+        run: |
+          [ -f kernel/build.log ] || { echo "build.log нет, смотри шаг выше"; exit 0; }
+          echo "=== make-цели с ошибкой ==="
+          grep -nE '\*\*\* \[' kernel/build.log | head -20 || true
+          echo "=== Error / FATAL ERROR с контекстом ==="
+          grep -n -B2 -A2 -m8 -E '^Error:|FATAL ERROR|error:' kernel/build.log || true
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SukiSU-miatoll
+          if-no-files-found: warn
+          path: |
+            kernel/SukiSU-miatoll-4.14.zip
+            kernel/out/arch/arm64/boot/Image*
+            kernel-config.txt
+            dtbo.img
+            kernel/build.log
