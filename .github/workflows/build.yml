@@ -3,16 +3,21 @@ name: Build SukiSU Kernel (miatoll 4.14)
 on:
   workflow_dispatch:
     inputs:
-      kernel_repo:
+     ksu_source:
+        description: Источник root
+        type: choice
+        options: [kernelsu-v0.9.5, sukisu]
+        default: kernelsu-v0.9.5
+     kernel_repo:
         description: Репозиторий ядра
         default: https://github.com/LineageOS/android_kernel_xiaomi_sm6250.git
-      kernel_branch:
+     kernel_branch:
         description: Ветка ядра
         default: lineage-22.2
-      ksu_ref:
+     ksu_ref:
         description: Ветка SukiSU (auto = nongki, иначе builtin)
         default: auto
-      hook_mode:
+     hook_mode:
         description: Способ хуков
         type: choice
         options: [kprobes, manual]
