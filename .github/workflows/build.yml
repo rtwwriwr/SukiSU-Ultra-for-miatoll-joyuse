@@ -126,7 +126,13 @@ jobs:
           if [ "$HOOK_MODE" = kprobes ]; then
             grep -q '^CONFIG_KPROBES=y' out/.config || { echo "::error::KPROBES не включился (нужен CONFIG_MODULES или другие зависимости)"; exit 1; }
           fi
-
+      - name: Patch DTS to fix syntax errors
+        run: |
+          cd kernel
+          # Удаляем проблемные директивы delete-property из DTS-файлов
+          find arch/arm64/boot/dts/qcom -name "cust-atoll.dtsi" -exec sed -i '/delete-property/d' {} \;
+          find arch/arm64/boot/dts/qcom -name "*-atoll-*-overlay.dts" -exec sed -i '/delete-property/d' {} \;
+          echo "=== DTS-файлы пропатчены ==="
       - name: Build Kernel
         working-directory: kernel
         run: |
